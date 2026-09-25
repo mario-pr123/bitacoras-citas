@@ -963,6 +963,7 @@ p {
   font-family: var(--serif);
   font-size: var(--read-size);
   line-height: 1.75;
+  text-align: center;
 }
 .chapter-body p {
   margin: 0 0 1.15em;
