@@ -12,7 +12,20 @@ const LOCAL_DIR = path.join(process.cwd(), '.data');
 const DB_PREFIX = 'db/';
 const KEEP_VERSIONS = 15; // copias anteriores de la base de datos que se conservan como respaldo
 
-const hasBlob = () => !!process.env.BLOB_READ_WRITE_TOKEN;
+// Vercel normalmente crea BLOB_READ_WRITE_TOKEN, pero si al conectar el store se eligió
+// otro prefijo la variable se llama, por ejemplo, MI_STORE_READ_WRITE_TOKEN. Aceptamos ambas.
+function blobToken() {
+  if (process.env.BLOB_READ_WRITE_TOKEN) return process.env.BLOB_READ_WRITE_TOKEN;
+  const key = Object.keys(process.env).find((k) => k.endsWith('_READ_WRITE_TOKEN') && String(process.env[k]).startsWith('vercel_blob_rw_'));
+  return key ? process.env[key] : '';
+}
+const hasBlob = () => !!blobToken();
+const opts = (extra = {}) => ({ token: blobToken(), ...extra });
+
+// Solo nombres (nunca valores) para ayudar a diagnosticar la configuración.
+export function blobEnvNames() {
+  return Object.keys(process.env).filter((k) => /BLOB|READ_WRITE_TOKEN/i.test(k));
+}
 
 export function storageMode() {
   if (hasBlob()) return 'blob';
@@ -21,7 +34,12 @@ export function storageMode() {
 
 function assertStorage() {
   if (storageMode() === 'missing') {
-    throw httpError(500, 'Falta conectar un Blob store al proyecto en Vercel (Storage → Blob).');
+    const names = blobEnvNames();
+    throw httpError(
+      500,
+      'Este despliegue no encuentra el token de Vercel Blob. Si ya conectaste el Blob store, ve a Deployments → Redeploy. ' +
+        (names.length ? `Variables relacionadas que sí ve: ${names.join(', ')}.` : 'No ve ninguna variable de Blob en este despliegue.'),
+    );
   }
 }
 
@@ -29,7 +47,7 @@ async function dbVersions() {
   const blobs = [];
   let cursor;
   do {
-    const r = await list({ prefix: DB_PREFIX, limit: 1000, cursor });
+    const r = await list(opts({ prefix: DB_PREFIX, limit: 1000, cursor }));
     blobs.push(...r.blobs);
     cursor = r.hasMore ? r.cursor : undefined;
   } while (cursor);
@@ -57,15 +75,14 @@ export async function writeData(data) {
   assertStorage();
   const body = JSON.stringify(data);
   if (hasBlob()) {
-    await put(`${DB_PREFIX}${Date.now()}.json`, body, {
-      access: 'public',
-      addRandomSuffix: true,
-      contentType: 'application/json',
-      cacheControlMaxAge: 60,
-    });
+    await put(
+      `${DB_PREFIX}${Date.now()}.json`,
+      body,
+      opts({ access: 'public', addRandomSuffix: true, contentType: 'application/json', cacheControlMaxAge: 60 }),
+    );
     const versions = await dbVersions();
     const old = versions.slice(KEEP_VERSIONS).map((b) => b.url);
-    if (old.length) await del(old).catch(() => {});
+    if (old.length) await del(old, opts()).catch(() => {});
     return;
   }
   await fs.mkdir(LOCAL_DIR, { recursive: true });
@@ -80,7 +97,7 @@ export async function saveImage(buffer, contentType) {
   if (!ext) throw httpError(415, 'Formato no permitido. Usa JPG, PNG o WebP.');
   const name = `fotos/${Date.now()}-${crypto.randomBytes(5).toString('hex')}.${ext}`;
   if (hasBlob()) {
-    const b = await put(name, buffer, { access: 'public', addRandomSuffix: true, contentType });
+    const b = await put(name, buffer, opts({ access: 'public', addRandomSuffix: true, contentType }));
     return b.url;
   }
   await fs.mkdir(path.join(LOCAL_DIR, 'fotos'), { recursive: true });
@@ -93,7 +110,7 @@ const isLocal = (u) => u.startsWith('/api/file?p=');
 
 export async function deleteImages(urls) {
   const blobUrls = urls.filter(isOwnBlob);
-  if (hasBlob() && blobUrls.length) await del(blobUrls);
+  if (hasBlob() && blobUrls.length) await del(blobUrls, opts());
   for (const u of urls.filter(isLocal)) {
     const p = decodeURIComponent(u.slice('/api/file?p='.length));
     if (/^fotos\/[\w.-]+$/.test(p)) await fs.unlink(path.join(LOCAL_DIR, p)).catch(() => {});
